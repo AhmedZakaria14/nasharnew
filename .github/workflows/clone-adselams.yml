@@ -1,11 +1,8 @@
-# Retriggered on 2026-08-08
 name: Clone full Adsela website
 
 on:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/clone-adselams.yml'
   workflow_dispatch:
 
 permissions:
@@ -25,14 +22,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Discover all public URLs
+      - name: Discover sitemap URLs
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import re
-          import urllib.request
-          import xml.etree.ElementTree as ET
+          import re, urllib.request, xml.etree.ElementTree as ET
           from urllib.parse import urlparse
 
           DOMAIN = 'adselams.com'
@@ -41,43 +36,38 @@ jobs:
               'https://adselams.com/sitemap_index.xml',
               'https://adselams.com/sitemap.xml',
           ]
-          seen_sitemaps = set()
+          seen = set()
           urls = {'https://adselams.com/'}
 
+          def same_site(url):
+              host = (urlparse(url).hostname or '').lower()
+              return host in {DOMAIN, 'www.' + DOMAIN}
+
           def fetch(url):
-              req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-              with urllib.request.urlopen(req, timeout=25) as r:
+              req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+              with urllib.request.urlopen(req, timeout=30) as r:
                   return r.read()
 
-          def same_site(url):
-              try:
-                  host = (urlparse(url).hostname or '').lower()
-                  return host in {DOMAIN, 'www.' + DOMAIN}
-              except Exception:
-                  return False
-
-          def walk_sitemap(url):
-              if url in seen_sitemaps:
+          def walk(url):
+              if url in seen:
                   return
-              seen_sitemaps.add(url)
+              seen.add(url)
               try:
-                  data = fetch(url)
-                  root = ET.fromstring(data)
+                  root = ET.fromstring(fetch(url))
               except Exception:
                   return
-              locs = []
-              for el in root.iter():
-                  if el.tag.lower().endswith('loc') and el.text:
-                      locs.append(el.text.strip())
+              locs = [e.text.strip() for e in root.iter() if e.tag.lower().endswith('loc') and e.text]
               is_index = root.tag.lower().endswith('sitemapindex')
               for loc in locs:
-                  if is_index and same_site(loc):
-                      walk_sitemap(loc)
-                  elif same_site(loc):
+                  if not same_site(loc):
+                      continue
+                  if is_index:
+                      walk(loc)
+                  else:
                       urls.add(loc)
 
           try:
-              robots = fetch('https://adselams.com/robots.txt').decode('utf-8', 'ignore')
+              robots = fetch('https://adselams.com/robots.txt').decode('utf-8','ignore')
               for m in re.finditer(r'(?im)^\s*Sitemap:\s*(\S+)', robots):
                   if same_site(m.group(1)):
                       seeds.append(m.group(1))
@@ -85,17 +75,14 @@ jobs:
               pass
 
           for s in seeds:
-              walk_sitemap(s)
+              walk(s)
 
-          with open('/tmp/adselams-urls.txt', 'w', encoding='utf-8') as f:
-              for u in sorted(urls):
-                  f.write(u + '\n')
-          print(f'Discovered {len(urls)} sitemap URLs')
+          with open('/tmp/adselams-urls.txt','w',encoding='utf-8') as f:
+              f.write('\n'.join(sorted(urls)) + '\n')
+          print('Discovered URLs:', len(urls))
           PY
-          echo 'First discovered URLs:'
-          head -30 /tmp/adselams-urls.txt || true
 
-      - name: Mirror website and all linked pages
+      - name: Mirror website
         shell: bash
         run: |
           set -euo pipefail
@@ -127,10 +114,10 @@ jobs:
             --directory-prefix=/tmp/site || true
 
           test -f /tmp/site/index.html
-          echo "Downloaded files: $(find /tmp/site -type f | wc -l)"
-          echo "HTML pages: $(find /tmp/site -type f -name '*.html' | wc -l)"
+          echo "Files: $(find /tmp/site -type f | wc -l)"
+          echo "HTML: $(find /tmp/site -type f -name '*.html' | wc -l)"
 
-      - name: Copy complete mirror into repository
+      - name: Replace repository content with fresh mirror
         shell: bash
         run: |
           set -euo pipefail
@@ -140,7 +127,7 @@ jobs:
             /tmp/site/ ./
           touch .nojekyll
 
-      - name: Commit full cloned website
+      - name: Commit fresh mirror
         shell: bash
         run: |
           set -euo pipefail
@@ -148,7 +135,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           if git diff --cached --quiet; then
-            echo 'No website changes to commit.'
+            echo 'No website changes found.'
             exit 0
           fi
           git commit -m 'Publish full Adsela website mirror'
