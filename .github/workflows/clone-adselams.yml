@@ -1,3 +1,4 @@
+# Retriggered on 2026-08-08
 name: Clone full Adsela website
 
 on:
@@ -101,7 +102,6 @@ jobs:
           rm -rf /tmp/site
           mkdir -p /tmp/site
 
-          # Full same-host recursive crawl from the homepage.
           wget \
             --mirror \
             --page-requisites \
@@ -115,7 +115,6 @@ jobs:
             --directory-prefix=/tmp/site \
             'https://adselams.com/' || true
 
-          # Seed pages discovered from WordPress/SEO sitemaps so unlinked pages are included too.
           wget \
             --input-file=/tmp/adselams-urls.txt \
             --page-requisites \
