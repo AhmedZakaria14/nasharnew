@@ -1,0 +1,156 @@
+name: Clone full Adsela website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/clone-adselams.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clone-adselams
+  cancel-in-progress: false
+
+jobs:
+  clone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Discover all public URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          from urllib.parse import urlparse
+
+          DOMAIN = 'adselams.com'
+          seeds = [
+              'https://adselams.com/wp-sitemap.xml',
+              'https://adselams.com/sitemap_index.xml',
+              'https://adselams.com/sitemap.xml',
+          ]
+          seen_sitemaps = set()
+          urls = {'https://adselams.com/'}
+
+          def fetch(url):
+              req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  return r.read()
+
+          def same_site(url):
+              try:
+                  host = (urlparse(url).hostname or '').lower()
+                  return host in {DOMAIN, 'www.' + DOMAIN}
+              except Exception:
+                  return False
+
+          def walk_sitemap(url):
+              if url in seen_sitemaps:
+                  return
+              seen_sitemaps.add(url)
+              try:
+                  data = fetch(url)
+                  root = ET.fromstring(data)
+              except Exception:
+                  return
+              locs = []
+              for el in root.iter():
+                  if el.tag.lower().endswith('loc') and el.text:
+                      locs.append(el.text.strip())
+              is_index = root.tag.lower().endswith('sitemapindex')
+              for loc in locs:
+                  if is_index and same_site(loc):
+                      walk_sitemap(loc)
+                  elif same_site(loc):
+                      urls.add(loc)
+
+          try:
+              robots = fetch('https://adselams.com/robots.txt').decode('utf-8', 'ignore')
+              for m in re.finditer(r'(?im)^\s*Sitemap:\s*(\S+)', robots):
+                  if same_site(m.group(1)):
+                      seeds.append(m.group(1))
+          except Exception:
+              pass
+
+          for s in seeds:
+              walk_sitemap(s)
+
+          with open('/tmp/adselams-urls.txt', 'w', encoding='utf-8') as f:
+              for u in sorted(urls):
+                  f.write(u + '\n')
+          print(f'Discovered {len(urls)} sitemap URLs')
+          PY
+          echo 'First discovered URLs:'
+          head -30 /tmp/adselams-urls.txt || true
+
+      - name: Mirror website and all linked pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/site
+          mkdir -p /tmp/site
+
+          # Full same-host recursive crawl from the homepage.
+          wget \
+            --mirror \
+            --page-requisites \
+            --convert-links \
+            --adjust-extension \
+            --no-host-directories \
+            --execute robots=off \
+            --user-agent='Mozilla/5.0 (compatible; AdselaStaticMirror/1.0)' \
+            --domains=adselams.com,www.adselams.com \
+            --reject-regex='(/wp-admin/|/wp-login\.php|/xmlrpc\.php|/trackback/?$|[?&]replytocom=)' \
+            --directory-prefix=/tmp/site \
+            'https://adselams.com/' || true
+
+          # Seed pages discovered from WordPress/SEO sitemaps so unlinked pages are included too.
+          wget \
+            --input-file=/tmp/adselams-urls.txt \
+            --page-requisites \
+            --convert-links \
+            --adjust-extension \
+            --no-host-directories \
+            --execute robots=off \
+            --user-agent='Mozilla/5.0 (compatible; AdselaStaticMirror/1.0)' \
+            --domains=adselams.com,www.adselams.com \
+            --directory-prefix=/tmp/site || true
+
+          test -f /tmp/site/index.html
+          echo "Downloaded files: $(find /tmp/site -type f | wc -l)"
+          echo "HTML pages: $(find /tmp/site -type f -name '*.html' | wc -l)"
+
+      - name: Copy complete mirror into repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            /tmp/site/ ./
+          touch .nojekyll
+
+      - name: Commit full cloned website
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No website changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Publish full Adsela website mirror'
+          git push origin HEAD:main
